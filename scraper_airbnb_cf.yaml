@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Restart EC2 Instance
+# This Template uses deploys a lambda function to Stop and restart EC2 instance
+# Created by: Mazhar Ali
+# Created on: 06th Jul 2022
+# Last updated:
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: EC2 Instance
+        Parameters:
+          - EC2InstanceID
+      - Label:
+          default: Region
+          Parameters:
+            - Region
+      - Label:
+          default: Lambda parameters
+        Parameters:
+          - LambdaFunctionName
+    ParameterLabels:
+      EC2InstanceID:
+        default: 'EC2 Instance you want access using the lambda function'
+      Region:
+        default: 'us-west-2'
+      LambdaFunctionName:
+        default: 'Name of the lambda function'
+
+Parameters:
+  EC2InstanceID:
+    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*
+    Default: 'lambda-resource-bundle'
+    Type: String
+  Region:
+    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*
+      Default: 'us-west-2'
+      Type: String
+  LambdaFunctionName:
+    Type: String
+    Default: 'airbnb-scraper-function'
+
+
+Resources:
+  IamRoleLambdaExecution:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName:
+            Fn::Join:
+              - "-"
+              - - airbnb
+                - monitor
+                - lambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - ec2:Start*
+                  - ec2:Stop*
+                Resource: "*"
+      Path: "/"
+      RoleName:
+        Fn::Join:
+          - "-"
+          - - airbnb-scraper
+            - production
+            - Ref: AWS::Region
+            - !Sub '${LambdaFunctionName}'
+
+  EC2LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          region = os.getenv('REGION')
+          instances = os.getenv('EC2_INSTANCE_ID')
+          ec2 = boto3.client('ec2', region_name=region)
+          
+          def lambda_handler(event, context):
+              ec2.stop_instances(InstanceIds=instances)
+              print('stopped your instances: ' + str(instances))
+
+      Handler: index.lambda_handler
+      Runtime: python3.8
+      FunctionName: !Ref LambdaFunctionName
+      MemorySize: 128
+      Timeout: 60
+      Environment:
+        Variables:
+          EC2_INSTANCE_ID:
+            Ref: EC2InstanceID
+          REGION:
+            Ref: Region
+      Role:
+        Fn::GetAtt:
+          - IamRoleLambdaExecution
+          - Arn
+  BackupLambdaPermissionEventsRuleSNS:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EC2LambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref CreateLambdaInvokeTopic
+  CreateLambdaInvokeTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !GetAtt EC2LambdaFunction.Arn
+          Protocol: lambda
+      TopicName: lambdainvokeSNS
+
+  LambdaTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - Ref: CreateLambdaInvokeTopic
+      PolicyDocument:
+        Statement:
+          - Sid: "CreateLambdaInvokeTopicSNSPolicy"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - sns:GetTopicAttributes
+              - sns:SetTopicAttributes
+              - sns:AddPermission
+              - sns:RemovePermission
+              - sns:DeleteTopic
+              - sns:Subscribe
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+              - sns:Receive
+            Resource:
+              Ref: CreateLambdaInvokeTopic
+          - Sid: "CreateLambdaInvokeTopicSNPublish"
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource:
+              Ref: CreateLambdaInvokeTopic
+Transform:
+  - AWS::Serverless-2016-10-31
